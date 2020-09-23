@@ -17,6 +17,7 @@ import (
 	"github.com/rancher/k3s/pkg/version"
 	"github.com/rancher/wrangler-api/pkg/generated/controllers/core"
 	"github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // newListener returns a new TCP listener and HTTP reqest handler using dynamiclistener.
@@ -96,5 +97,5 @@ func tlsStorage(ctx context.Context, dataDir string, runtime *config.ControlRunt
 	cache := memory.NewBacked(fileStorage)
 	return kubernetes.New(ctx, func() *core.Factory {
 		return runtime.Core
-	}, "kube-system", version.Program+"-serving", cache)
+	}, metav1.NamespaceSystem, version.Program+"-serving", cache)
 }
