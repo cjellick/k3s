@@ -16,6 +16,11 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
+const (
+	tokenPrefix = "K10"
+	tokenFormat = "%s%s::%s:%s"
+)
+
 var (
 	insecureClient = &http.Client{
 		Transport: &http.Transport{
@@ -28,12 +33,7 @@ var (
 
 type OverrideURLCallback func(config []byte) (*url.URL, error)
 
-type clientToken struct {
-	caHash   string
-	username string
-	password string
-}
-
+// WriteClientKubeConfig generates a kubeconfig at destFile that can be used to connect to a server at url with the given certs and keys
 func WriteClientKubeConfig(destFile, url, serverCAFile, clientCertFile, clientKeyFile string) error {
 	serverCA, err := ioutil.ReadFile(serverCAFile)
 	if err != nil {
@@ -75,117 +75,97 @@ func WriteClientKubeConfig(destFile, url, serverCAFile, clientCertFile, clientKe
 type Info struct {
 	URL      string `json:"url,omitempty"`
 	CACerts  []byte `json:"cacerts,omitempty"`
-	username string
-	password string
-	Token    string `json:"token,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+	caHash   string
 }
 
+// ToToken returns the token data, templated according to the token format
 func (i *Info) ToToken() string {
-	return fmt.Sprintf("K10%s::%s:%s", hashCA(i.CACerts), i.username, i.password)
+	return fmt.Sprintf(tokenFormat, tokenPrefix, hashCA(i.CACerts), i.Username, i.Password)
 }
 
-func NormalizeAndValidateTokenForUser(server, token, user string) (string, error) {
-	if !strings.HasPrefix(token, "K10") {
-		token = "K10::" + user + ":" + token
-	}
-	info, err := ParseAndValidateToken(server, token)
-	if err != nil {
-		return "", err
-	}
-
-	if info.username != user {
-		info.username = user
-	}
-
-	return info.ToToken(), nil
-}
-
-func ParseAndValidateToken(server, token string) (*Info, error) {
-	url, err := url.Parse(server)
-	if err != nil {
-		return nil, errors.Wrapf(err, "Invalid url, failed to parse %s", server)
-	}
-
-	if url.Scheme != "https" {
-		return nil, fmt.Errorf("only https:// URLs are supported, invalid scheme: %s", server)
-	}
-
-	for strings.HasSuffix(url.Path, "/") {
-		url.Path = url.Path[:len(url.Path)-1]
-	}
-
-	parsedToken, err := parseToken(token)
+// NormalizeAndValidateTokenForUser parses a token with user override, downloads and
+// validates the server's CA bundle, and validates it according to the caHash from the token if set.
+func NormalizeAndValidateTokenForUser(server, token, user string) (*Info, error) {
+	info, err := parseToken(token)
 	if err != nil {
 		return nil, err
 	}
 
-	cacerts, err := GetCACerts(*url)
-	if err != nil {
+	info.Username = user
+
+	if err := info.setServer(server); err != nil {
 		return nil, err
 	}
 
-	if len(cacerts) > 0 && len(parsedToken.caHash) > 0 {
-		if ok, hash, newHash := validateCACerts(cacerts, parsedToken.caHash); !ok {
-			return nil, fmt.Errorf("token does not match the server %s != %s", hash, newHash)
+	if info.caHash != "" {
+		if err := info.validateCAHash(); err != nil {
+			return nil, err
 		}
 	}
 
-	if err := validateToken(*url, cacerts, parsedToken.username, parsedToken.password); err != nil {
+	return info, nil
+}
+
+// ParseAndValidateToken parses a token, downloads and validates the server's CA bundle,
+// and validates it according to the caHash from the token if set.
+func ParseAndValidateToken(server, token string) (*Info, error) {
+	info, err := parseToken(token)
+	if err != nil {
 		return nil, err
 	}
 
-	i := &Info{
-		URL:      url.String(),
-		CACerts:  cacerts,
-		username: parsedToken.username,
-		password: parsedToken.password,
-		Token:    token,
+	if err := info.setServer(server); err != nil {
+		return nil, err
 	}
 
-	// normalize token
-	i.Token = i.ToToken()
-	return i, nil
-}
-
-func validateToken(u url.URL, cacerts []byte, username, password string) error {
-	u.Path = "/cacerts"
-	_, err := get(u.String(), GetHTTPClient(cacerts), username, password)
-	if err != nil {
-		return errors.Wrap(err, "token is not valid")
+	if info.caHash != "" {
+		if err := info.validateCAHash(); err != nil {
+			return nil, err
+		}
 	}
-	return nil
+
+	return info, nil
 }
 
-func validateCACerts(cacerts []byte, hash string) (bool, string, string) {
+// validateCACerts returns a boolean indicating whether or not a CA bundle matches the provided hash,
+// and a string containing the hash of the CA bundle.
+func validateCACerts(cacerts []byte, hash string) (bool, string) {
 	if len(cacerts) == 0 && hash == "" {
-		return true, "", ""
+		return true, ""
 	}
 
 	newHash := hashCA(cacerts)
-	return hash == newHash, hash, newHash
+	return hash == newHash, newHash
 }
 
+// hashCA returns the hex-encoded SHA256 digest of a byte array.
 func hashCA(cacerts []byte) string {
 	digest := sha256.Sum256(cacerts)
 	return hex.EncodeToString(digest[:])
 }
 
+// ParseUsernamePassword returns the username and password portion of a token string,
+// along with a bool indicating if the token was successfully parsed.
 func ParseUsernamePassword(token string) (string, string, bool) {
-	parsed, err := parseToken(token)
+	info, err := parseToken(token)
 	if err != nil {
 		return "", "", false
 	}
-	return parsed.username, parsed.password, true
+	return info.Username, info.Password, true
 }
 
-func parseToken(token string) (clientToken, error) {
-	var result clientToken
+// parseToken parses a token into an Info struct
+func parseToken(token string) (*Info, error) {
+	var result = &Info{}
 
-	if !strings.HasPrefix(token, "K10") {
-		return result, fmt.Errorf("token is not a valid token format")
+	if !strings.HasPrefix(token, tokenPrefix) {
+		token = fmt.Sprintf(tokenFormat, tokenPrefix, "", "", token)
 	}
 
-	token = token[3:]
+	// Strip off the prefix
+	token = token[len(tokenPrefix):]
 
 	parts := strings.SplitN(token, "::", 2)
 	token = parts[0]
@@ -196,15 +176,19 @@ func parseToken(token string) (clientToken, error) {
 
 	parts = strings.SplitN(token, ":", 2)
 	if len(parts) != 2 {
-		return result, fmt.Errorf("token credentials are the wrong format")
+		return nil, fmt.Errorf("invalid token format")
 	}
 
-	result.username = parts[0]
-	result.password = parts[1]
+	result.Username = parts[0]
+	result.Password = parts[1]
 
 	return result, nil
 }
 
+// GetHTTPClient returns a http client that validates TLS server certificates using the provided CA bundle.
+// If the CA bundle is empty, it validates using the default http client using the OS CA bundle.
+// If the CA bundle is not empty but does not contain any valid certs, it validates using
+// an empty CA bundle (which will always fail).
 func GetHTTPClient(cacerts []byte) *http.Client {
 	if len(cacerts) == 0 {
 		return http.DefaultClient
@@ -223,13 +207,49 @@ func GetHTTPClient(cacerts []byte) *http.Client {
 	}
 }
 
+// Get makes a request to a subpath of info's URL
 func Get(path string, info *Info) ([]byte, error) {
 	u, err := url.Parse(info.URL)
 	if err != nil {
 		return nil, err
 	}
 	u.Path = path
-	return get(u.String(), GetHTTPClient(info.CACerts), info.username, info.password)
+	return get(u.String(), GetHTTPClient(info.CACerts), info.Username, info.Password)
+}
+
+// setServer sets the URL and CACerts fields of the Info by connecting to the server
+// and storing the CA bundle.
+func (i *Info) setServer(server string) error {
+	url, err := url.Parse(server)
+	if err != nil {
+		return errors.Wrapf(err, "Invalid server url, failed to parse: %s", server)
+	}
+
+	if url.Scheme != "https" {
+		return fmt.Errorf("only https:// URLs are supported, invalid scheme: %s", server)
+	}
+
+	for strings.HasSuffix(url.Path, "/") {
+		url.Path = url.Path[:len(url.Path)-1]
+	}
+
+	cacerts, err := GetCACerts(*url)
+	if err != nil {
+		return err
+	}
+
+	i.URL = url.String()
+	i.CACerts = cacerts
+	return nil
+}
+
+// ValidateCAHash validates that info's caHash matches the CACerts hash.
+func (i *Info) validateCAHash() error {
+	if ok, serverHash := validateCACerts(i.CACerts, i.caHash); !ok {
+		return fmt.Errorf("token CA hash does not match the server CA hash: %s != %s", i.caHash, serverHash)
+	}
+
+	return nil
 }
 
 // GetCACerts retrieves the CA bundle from a server.

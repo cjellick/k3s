@@ -48,7 +48,7 @@ func (c *Cluster) shouldBootstrapLoad() (bool, error) {
 			return false, err
 		}
 
-		info, err := clientaccess.ParseAndValidateToken(c.config.JoinURL, token)
+		info, err := clientaccess.ParseAndValidateToken(c.config.JoinURL, token.ToToken())
 		if err != nil {
 			return false, err
 		}
