@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pkg/errors"
 	"github.com/rancher/k3s/pkg/bootstrap"
 	"github.com/rancher/k3s/pkg/clientaccess"
 	"github.com/rancher/k3s/pkg/version"
@@ -21,7 +22,7 @@ func (c *Cluster) Bootstrap(ctx context.Context) error {
 		return err
 	}
 
-	runBootstrap, err := c.shouldBootstrapLoad()
+	runBootstrap, err := c.shouldBootstrapLoad(ctx)
 	if err != nil {
 		return err
 	}
@@ -36,22 +37,39 @@ func (c *Cluster) Bootstrap(ctx context.Context) error {
 	return nil
 }
 
-func (c *Cluster) shouldBootstrapLoad() (bool, error) {
+// shouldBootstrapLoad returns true if we need to load ControlRuntimeBootstrap data again.
+// This is controlled by a stamp file on disk that records successful bootstrap using a hash of the join token.
+func (c *Cluster) shouldBootstrapLoad(ctx context.Context) (bool, error) {
+	// If using a managed database, see if we need to bootstrap
 	if c.managedDB != nil {
 		c.runtime.HTTPBootstrap = true
+		// No URL to join, so don't need to bootstrap
 		if c.config.JoinURL == "" {
 			return false, nil
 		}
 
-		token, err := clientaccess.NormalizeAndValidateTokenForUser(c.config.JoinURL, c.config.Token, "server")
+		// Validate the join token
+		info, err := clientaccess.NormalizeAndValidateTokenForUser(c.config.JoinURL, c.config.Token, "server")
 		if err != nil {
+			// If we got a Service Unavailable error from the join URL, and the managed database is already
+			// initialized, bypass additional bootstrap checks.
+			// Normally this would be fatal, but in the case of quorum loss the other server cannot serve the
+			// CA bundle until the datastore is up, and the datastore can't come up until we come up to restore quorum.
+			// Break this deadlock by ignoring the failure if the managed database has already been initialized.
+			// If the user has changed the JoinURL to target a different cluster and we SHOULD re-bootstrap,
+			// etcd will fail to join the new cluster due to invalid certificates, and startup will fail until
+			// another node can come online to restore quorum, or the cluster is reset by the administrator.
+			if errors.Is(err, clientaccess.ErrServiceUnavailable) {
+				if isInitialized, err2 := c.managedDB.IsInitialized(ctx, c.config); err2 != nil {
+					logrus.Warnf("Failed to check managed database initialization: %v", err2)
+				} else if isInitialized {
+					logrus.Warnf("Ignoring bootstrap token validation error on initialized member due to cluster quorum loss: %v", err)
+					return false, nil
+				}
+			}
 			return false, err
 		}
 
-		info, err := clientaccess.ParseAndValidateToken(c.config.JoinURL, token.ToToken())
-		if err != nil {
-			return false, err
-		}
 		c.clientAccessInfo = info
 	}
 

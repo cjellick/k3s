@@ -22,7 +22,8 @@ const (
 )
 
 var (
-	insecureClient = &http.Client{
+	ErrServiceUnavailable = &http.ProtocolError{ErrorString: "service unavailable"}
+	insecureClient        = &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true,
@@ -284,6 +285,8 @@ func GetCACerts(u url.URL) ([]byte, error) {
 	return cacerts, nil
 }
 
+// get makes a request to a url using a provided client, username, and password,
+// returning the response body.
 func get(u string, client *http.Client, username, password string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
@@ -300,7 +303,10 @@ func get(u string, client *http.Client, username, password string) ([]byte, erro
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	// Return a unique error for 503 responses so that we can handle them when bootstrapping
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return nil, ErrServiceUnavailable
+	} else if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: %s", u, resp.Status)
 	}
 
