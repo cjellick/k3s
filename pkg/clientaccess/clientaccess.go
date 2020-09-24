@@ -232,23 +232,33 @@ func Get(path string, info *Info) ([]byte, error) {
 	return get(u.String(), GetHTTPClient(info.CACerts), info.username, info.password)
 }
 
+// GetCACerts retrieves the CA bundle from a server.
+// An error is raised if the CA bundle cannot be retrieved,
+// or if the server's cert is not signed by the returned bundle.
 func GetCACerts(u url.URL) ([]byte, error) {
 	u.Path = "/cacerts"
 	url := u.String()
 
+	// This first request is expected to fail. If the server has
+	// a cert that can be validated using the default CA bundle, return
+	// success with no CA certs.
 	_, err := get(url, http.DefaultClient, "", "")
 	if err == nil {
 		return nil, nil
 	}
 
+	// Download the CA bundle using a client that does not validate certs.
 	cacerts, err := get(url, insecureClient, "", "")
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get CA certs at %s", url)
+		return nil, errors.Wrap(err, "failed to get CA certs")
 	}
 
+	// Request the CA bundle again, validating that the CA bundle can be loaded
+	// and used to validate the server certificate. This should only fail if we somehow
+	// get an empty CA bundle. or if the dynamiclistener cert is incorrectly signed.
 	_, err = get(url, GetHTTPClient(cacerts), "", "")
 	if err != nil {
-		return nil, errors.Wrapf(err, "server %s is not trusted", url)
+		return nil, errors.Wrap(err, "CA cert validation failed")
 	}
 
 	return cacerts, nil
