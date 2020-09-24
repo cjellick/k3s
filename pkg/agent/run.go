@@ -162,7 +162,7 @@ func Run(ctx context.Context, cfg cmds.Agent) error {
 			}
 			continue
 		}
-		cfg.Token = newToken
+		cfg.Token = newToken.ToToken()
 		break
 	}
 
