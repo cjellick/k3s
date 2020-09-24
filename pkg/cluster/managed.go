@@ -5,13 +5,10 @@ package cluster
 
 import (
 	"context"
-	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/rancher/k3s/pkg/cluster/managed"
-	"github.com/rancher/kine/pkg/endpoint"
 	"github.com/sirupsen/logrus"
 )
 
@@ -59,18 +56,13 @@ func (c *Cluster) start(ctx context.Context) error {
 	return c.managedDB.Start(ctx, c.clientAccessInfo)
 }
 
-func (c *Cluster) initClusterDB(ctx context.Context, l net.Listener, handler http.Handler) (net.Listener, http.Handler, error) {
+// initClusterDB registers routes for database info with the http request handler
+func (c *Cluster) initClusterDB(ctx context.Context, handler http.Handler) (http.Handler, error) {
 	if c.managedDB == nil {
-		return l, handler, nil
+		return handler, nil
 	}
 
-	if !strings.HasPrefix(c.config.Datastore.Endpoint, c.managedDB.EndpointName()+"://") {
-		c.config.Datastore = endpoint.Config{
-			Endpoint: c.managedDB.EndpointName(),
-		}
-	}
-
-	return c.managedDB.Register(ctx, c.config, l, handler)
+	return c.managedDB.Register(ctx, c.config, handler)
 }
 
 // assignManagedDriver checks to see if any managed databases are already configured or should be created/joined.
@@ -86,14 +78,7 @@ func (c *Cluster) assignManagedDriver(ctx context.Context) error {
 		}
 	}
 
-	endpointType := strings.SplitN(c.config.Datastore.Endpoint, ":", 2)[0]
-	for _, driver := range managed.Registered() {
-		if endpointType == driver.EndpointName() {
-			c.managedDB = driver
-			return nil
-		}
-	}
-
+	// If we have been asked to initialize or join a cluster, do so using the default managed database.
 	if c.config.Datastore.Endpoint == "" && (c.config.ClusterInit || (c.config.Token != "" && c.config.JoinURL != "")) {
 		for _, driver := range managed.Registered() {
 			if driver.EndpointName() == managed.Default() {

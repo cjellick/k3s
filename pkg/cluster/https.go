@@ -51,31 +51,37 @@ func (c *Cluster) newListener(ctx context.Context) (net.Listener, http.Handler, 
 // initClusterAndHTTPS sets up the dynamic tls listener, request router,
 // and cluster database. Once the database is up, it starts the supervisor http server.
 func (c *Cluster) initClusterAndHTTPS(ctx context.Context) error {
-	l, handler, err := c.newListener(ctx)
+	// Set up dynamiclistener TLS listener and request handler
+	listener, handler, err := c.newListener(ctx)
 	if err != nil {
 		return err
 	}
 
+	// Get the base request handler
 	handler, err = c.getHandler(handler)
 	if err != nil {
 		return err
 	}
 
-	l, handler, err = c.initClusterDB(ctx, l, handler)
+	// Config the cluster database and allow it to add additional request handlers
+	handler, err = c.initClusterDB(ctx, handler)
 	if err != nil {
 		return err
 	}
 
+	// Create a HTTP server with the registered request handlers, using logrus for logging
 	server := http.Server{
 		Handler:  handler,
 		ErrorLog: log.New(logrus.StandardLogger().Writer(), "Cluster-Http-Server ", log.LstdFlags),
 	}
 
+	// Start the supervisor http server on the tls listener
 	go func() {
-		err := server.Serve(l)
+		err := server.Serve(listener)
 		logrus.Fatalf("server stopped: %v", err)
 	}()
 
+	// Shutdown the http server when the context is closed
 	go func() {
 		<-ctx.Done()
 		server.Shutdown(context.Background())
